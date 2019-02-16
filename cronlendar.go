@@ -11,68 +11,85 @@ import (
 
 const (
 	timeLayout = "15:04"
-	today      = "today"
-	tomorrow   = "tomorrow"
+	star       = -1
 )
 
-func Run(tm time.Time, r io.Reader, w io.Writer) {
+func Run(r io.Reader, w io.Writer, baseTime time.Time) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Split(bufio.ScanLines)
 	for scanner.Scan() {
-		task := decodeTask(scanner.Text())
-		if task == nil {
+		line := scanner.Text()
+		if line == "" {
 			continue
 		}
-		task.printSchedule(w, tm)
+		task, err := decodeTask(line)
+		if err != nil {
+			return err
+		}
+		if err = task.printSchedule(w, baseTime); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-type Task struct {
-	Minute string
-	Hour   string
-	Cmd    string
-}
-
-func (t *Task) printSchedule(w io.Writer, now time.Time) {
-	next := t.next(now)
-	fmt.Fprintf(w, "%s %s - %s\n",
-		strings.TrimPrefix(next.Format(timeLayout), "0"),
-		t.day(now, next),
-		t.Cmd)
-}
-
-func (t *Task) next(now time.Time) time.Time {
-	switch {
-	case t.Minute == "*" && t.Hour == "*":
-		t.Hour = fmt.Sprintf("%d", now.Hour())
-		t.Minute = fmt.Sprintf("%d", now.Minute())
-	case t.Hour == "*":
-		t.Hour = fmt.Sprintf("%d", now.Hour())
-	case t.Minute == "*":
-		t.Minute = "00"
-	}
-	hour, _ := strconv.Atoi(t.Hour)
-	minute, _ := strconv.Atoi(t.Minute)
-	year, month, day := now.Date()
-	next := time.Date(year, month, day, hour, minute, 0, 0, time.UTC)
-	if next.Before(now) {
-		return next.Add(24 * time.Hour)
-	}
-	return next
-}
-
-func (t *Task) day(now, next time.Time) string {
-	d := 24 * time.Hour
-	if next.Truncate(d).Equal(now.Truncate(d)) {
-		return today
-	}
-	return tomorrow
-}
-
-func decodeTask(s string) *Task {
+func decodeTask(s string) (task, error) {
 	fields := strings.Split(s, " ")
 	if len(fields) != 3 {
-		return nil
+		return task{}, fmt.Errorf("invalid task: '%s'", s)
 	}
-	return &Task{Minute: fields[0], Hour: fields[1], Cmd: fields[2]}
+	for i := range fields[0:2] {
+		if fields[i] == "*" {
+			fields[i] = "-1"
+		}
+	}
+	minute, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return task{}, err
+	}
+	hour, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return task{}, err
+	}
+	return task{minute: minute, hour: hour, cmd: fields[2]}, nil
+}
+
+type task struct {
+	minute, hour int
+	cmd          string
+}
+
+func (t task) printSchedule(w io.Writer, baseTime time.Time) error {
+	next := t.nextRun(baseTime)
+	_, err := fmt.Fprintf(w, "%s %s - %s\n",
+		strings.TrimPrefix(next.Format(timeLayout), "0"),
+		day(baseTime, next),
+		t.cmd)
+	return err
+}
+
+func (t task) nextRun(baseTime time.Time) time.Time {
+	hour, minute := t.hour, t.minute
+	switch {
+	case t.minute == star && t.hour == star:
+		hour, minute = baseTime.Hour(), baseTime.Minute()
+	case t.hour == star:
+		hour = baseTime.Hour()
+	case t.minute == star:
+		minute = 0
+	}
+	baseHour, baseMinute, _ := baseTime.Clock()
+	delta := time.Duration(hour-baseHour)*time.Hour +
+		time.Duration(minute-baseMinute)*time.Minute
+	if delta < 0 {
+		delta = 24*time.Hour + delta
+	}
+	return baseTime.Add(delta)
+}
+
+func day(baseTime, next time.Time) string {
+	if baseTime.Day() != next.Day() {
+		return "tomorrow"
+	}
+	return "today"
 }
